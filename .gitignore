@@ -1,0 +1,43 @@
+# Visual Studio user settings and caches
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.VC.db
+*.VC.db-shm
+*.VC.db-wal
+*.VC.opendb
+*.sdf
+*.opensdf
+ipch/
+
+# Build output directories
+[Dd]ebug/
+[Dd]ebugPublic/
+[Rr]elease/
+[Rr]eleases/
+x64/
+x86/
+Win32/
+[Bb]in/
+[Oo]bj/
+
+# C/C++ intermediate and generated files
+*.obj
+*.iobj
+*.pch
+*.pdb
+*.ipdb
+*.idb
+*.ilk
+*.res
+*.tlog
+*.lastbuildstate
+*.recipe
+*.exp
+*.exe
+*.dll
+*.lib
+*.pgc
+*.pgd
