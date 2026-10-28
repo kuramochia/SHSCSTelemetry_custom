@@ -19,3 +19,11 @@ jobs:
 
       - name: Build x64 Release
         run: msbuild SHETS2Telemetry_x64_kuramochia\SHETS2Telemetry_x64_kuramochia.sln /m /p:Configuration=Release /p:Platform=x64
+
+      - name: Upload x64 Release DLL
+        uses: actions/upload-artifact@v4
+        with:
+          name: SHETS2Telemetry-x64-Release
+          path: bin/win_x64/SHETS2Telemetry_x64_kuramochia.dll
+          if-no-files-found: error
+          retention-days: 30
