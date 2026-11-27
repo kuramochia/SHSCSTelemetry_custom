@@ -21,6 +21,7 @@
 // Plug-in
 #include "log.hpp"
 #include "scs-telemetry-common.hpp"
+#include "scs_bus.hpp"
 #include "scs_config_handlers.hpp"
 #include "scs_gameplay_event_handlers.hpp"
 #include "sharedmemory.hpp"
@@ -517,7 +518,42 @@ SCSAPI_VOID telemetry_gameplay(const scs_event_t event,
   // log_events(info);
   // check which type the event has
   gameplayType type = {};
-  if (strcmp(info->id, SCS_TELEMETRY_GAMEPLAY_EVENT_car_job_cancelled) == 0 ||
+  const bool is_bus_event =
+      strcmp(info->id, SCS_TELEMETRY_GAMEPLAY_EVENT_bus_job_cancelled) == 0 ||
+      strcmp(info->id, SCS_TELEMETRY_GAMEPLAY_EVENT_bus_job_completed) == 0;
+  if (is_bus_event) {
+    if (!lock_bus_memory()) return;
+    const auto was_cancelled =
+        strcmp(info->id, SCS_TELEMETRY_GAMEPLAY_EVENT_bus_job_cancelled) == 0;
+    type = was_cancelled ? bus_cancelled : bus_completed;
+    if (was_cancelled) {
+      telem_ptr->bus_extension.cancelled ^= true;
+      telem_ptr->special_b.jobCancelled ^= true;
+      telem_ptr->gameplay_ll.jobCancelledPenalty = 0;
+    } else {
+      telem_ptr->bus_extension.completedSatisfactionValid = false;
+      telem_ptr->bus_extension.lastDeliveredType = active_job_bus;
+      telem_ptr->bus_extension.completed ^= true;
+      telem_ptr->special_b.jobDelivered ^= true;
+      telem_ptr->gameplay_ll.jobDeliveredRevenue = 0;
+      telem_ptr->gameplay_i.jobDeliveredEarnedXp = 0;
+      telem_ptr->gameplay_ui.jobDeliveredDeliveryTime = 0;
+      telem_ptr->gameplay_f.jobDeliveredDistanceKm = 0;
+      telem_ptr->gameplay_f.jobDeliveredCargoDamage = 0;
+      telem_ptr->gameplay_b.jobDeliveredAutoparkUsed = false;
+      telem_ptr->gameplay_b.jobDeliveredAutoloadUsed = false;
+    }
+    if (telem_ptr->car_extension.activeJobType == active_job_bus) {
+      telem_ptr->special_b.jobFinished ^= true;
+      telem_ptr->special_b.onJob = false;
+      telem_ptr->car_extension.activeJobType = active_job_none;
+      set_job_values_zero();
+    }
+    telem_ptr->special_b.onBusJob = false;
+    telem_ptr->bus_extension.averageSatisfactionValid = false;
+    telem_ptr->gameplay_ui.jobFinishedTime = telem_ptr->common_ui.time_abs;
+    clear_bus_configuration();
+  } else if (strcmp(info->id, SCS_TELEMETRY_GAMEPLAY_EVENT_car_job_cancelled) == 0 ||
       strcmp(info->id, SCS_TELEMETRY_GAMEPLAY_EVENT_car_job_delivered) == 0) {
     const auto was_cancelled = strcmp(info->id, SCS_TELEMETRY_GAMEPLAY_EVENT_car_job_cancelled) == 0;
     type = was_cancelled ? car_cancelled : car_delivered;
@@ -526,6 +562,7 @@ SCSAPI_VOID telemetry_gameplay(const scs_event_t event,
       telem_ptr->special_b.carJobCancelled ^= true;
       telem_ptr->special_b.jobCancelled ^= true;
     } else {
+      telem_ptr->bus_extension.lastDeliveredType = active_job_car;
       telem_ptr->special_b.carJobDelivered ^= true;
       telem_ptr->special_b.jobDelivered ^= true;
       telem_ptr->gameplay_b.jobDeliveredAutoparkUsed = false;
@@ -550,6 +587,7 @@ SCSAPI_VOID telemetry_gameplay(const scs_event_t event,
   } else if (strcmp(info->id, SCS_TELEMETRY_GAMEPLAY_EVENT_job_delivered) ==
              0) {
     type = delivered;
+    telem_ptr->bus_extension.lastDeliveredType = active_job_freight;
     telem_ptr->special_b.jobDelivered ^= true;
     telem_ptr->gameplay_ui.jobFinishedTime = telem_ptr->common_ui.time_abs;
     telem_ptr->special_b.onJob = false;
@@ -590,6 +628,7 @@ SCSAPI_VOID telemetry_gameplay(const scs_event_t event,
     }
     is_empty = false;
   }
+  if (is_bus_event) unlock_bus_memory();
 }
 
 // Function: telemetry_configuration
@@ -604,7 +643,78 @@ SCSAPI_VOID telemetry_configuration(const scs_event_t event,
       // values when changes occur but not in arrays up to that slot or so
       event_info);
   if (strcmp(info->id, SCS_TELEMETRY_CONFIG_bus_job) == 0) {
-    telem_ptr->special_b.onBusJob = info->attributes->name != nullptr;
+    if (!lock_bus_memory()) return;
+    const auto empty = info->attributes->name == nullptr;
+    if (empty) {
+      telem_ptr->special_b.onBusJob = false;
+      telem_ptr->bus_extension.averageSatisfactionValid = false;
+      clear_bus_configuration();
+      if (telem_ptr->car_extension.activeJobType == active_job_bus) {
+        telem_ptr->special_b.onJob = false;
+        telem_ptr->special_b.jobFinished ^= true;
+        telem_ptr->car_extension.activeJobType = active_job_none;
+        set_job_values_zero();
+      }
+    } else {
+      if (telem_ptr->car_extension.activeJobType != active_job_bus) {
+        telem_ptr->gameplay_ui.jobStartingTime = telem_ptr->common_ui.time_abs;
+      }
+      set_job_values_zero();
+      telem_ptr->special_b.onJob = true;
+      telem_ptr->special_b.onCarJob = false;
+      telem_ptr->special_b.onBusJob = true;
+      telem_ptr->car_extension.activeJobType = active_job_bus;
+
+      scs_u32_t stage_count = 0;
+      bool valid_stage_count = false;
+      for (auto current = info->attributes; current->name; ++current) {
+        if (strcmp(current->name, SCS_TELEMETRY_CONFIG_ATTRIBUTE_bus_stages_count) == 0 &&
+            current->index == SCS_U32_NIL &&
+            current->value.type == SCS_VALUE_TYPE_u32) {
+          stage_count = current->value.value_u32.value;
+          valid_stage_count = true;
+        } else if (strcmp(current->name, SCS_TELEMETRY_CONFIG_ATTRIBUTE_income) == 0 &&
+                   current->value.type == SCS_VALUE_TYPE_u64) {
+          telem_ptr->config_ull.jobIncome = current->value.value_u64.value;
+        } else if (strcmp(current->name, SCS_TELEMETRY_CONFIG_ATTRIBUTE_planned_distance_km) == 0 &&
+                   current->value.type == SCS_VALUE_TYPE_u32) {
+          telem_ptr->config_ui.plannedDistanceKm = current->value.value_u32.value;
+        } else if (strcmp(current->name, SCS_TELEMETRY_CONFIG_ATTRIBUTE_bus_job_market) == 0 &&
+                   current->value.type == SCS_VALUE_TYPE_string) {
+          strncpy_s(telem_ptr->config_s.jobMarket,
+                    sizeof telem_ptr->config_s.jobMarket,
+                    current->value.value_string.value, _TRUNCATE);
+        }
+      }
+      if (!valid_stage_count) {
+        log_line(SCS_LOG_TYPE_error, "Missing or invalid bus stage count");
+      } else if (stage_count > 0) {
+        for (auto current = info->attributes; current->name; ++current) {
+          if (current->value.type != SCS_VALUE_TYPE_string) continue;
+          char* destination = nullptr;
+          if (current->index == 0) {
+            if (strcmp(current->name, SCS_TELEMETRY_CONFIG_ATTRIBUTE_source_stop_id) == 0) {
+              destination = telem_ptr->config_s.citySrcId;
+            } else if (strcmp(current->name, SCS_TELEMETRY_CONFIG_ATTRIBUTE_source_stop_name) == 0) {
+              destination = telem_ptr->config_s.citySrc;
+            }
+          }
+          if (current->index == stage_count - 1) {
+            if (strcmp(current->name, SCS_TELEMETRY_CONFIG_ATTRIBUTE_destination_stop_id) == 0) {
+              destination = telem_ptr->config_s.cityDstId;
+            } else if (strcmp(current->name, SCS_TELEMETRY_CONFIG_ATTRIBUTE_destination_stop_name) == 0) {
+              destination = telem_ptr->config_s.cityDst;
+            }
+          }
+          if (destination) {
+            strncpy_s(destination, stringsize,
+                      current->value.value_string.value, _TRUNCATE);
+          }
+        }
+      }
+      publish_bus_configuration(info);
+    }
+    unlock_bus_memory();
     return;
   }
   unsigned int trailer_id = NULL;
@@ -670,6 +780,12 @@ SCSAPI_VOID telemetry_configuration(const scs_event_t event,
     // An empty notification for the other job type must not end the active job.
     if (is_empty && telem_ptr->car_extension.activeJobType != job_type) {
       return;
+    }
+    if (!is_empty && telem_ptr->special_b.onBusJob && lock_bus_memory()) {
+      telem_ptr->special_b.onBusJob = false;
+      telem_ptr->bus_extension.averageSatisfactionValid = false;
+      clear_bus_configuration();
+      unlock_bus_memory();
     }
     set_job_values_zero();
   }
@@ -747,6 +863,17 @@ SCSAPI_VOID telemetry_store_mandatory_break(const scs_string_t name, const scs_u
     return;
   }
   telemetry_store_s32(name, index, value, context);
+}
+
+SCSAPI_VOID telemetry_store_bus_satisfaction(
+    const scs_string_t name, const scs_u32_t index,
+    const scs_value_t* const value, scs_context_t context) {
+  if (!lock_bus_memory()) return;
+  telem_ptr->bus_extension.averageSatisfactionValid = value != nullptr;
+  if (value) {
+    telem_ptr->bus_extension.averageSatisfaction = value->value_float.value;
+  }
+  unlock_bus_memory();
 }
 
 SCSAPI_VOID telemetry_store_u32(const scs_string_t name, const scs_u32_t index,
@@ -892,6 +1019,11 @@ SCSAPI_RESULT scs_telemetry_init(
   telem_ptr->car_job = {};
   telem_ptr->car_gameplay = {};
   telem_ptr->car_extension = {};
+  telem_ptr->bus_extension = {};
+  if (!initialize_bus_memory()) {
+    telem_ptr->sdkActive = false;
+    return SCS_RESULT_generic_error;
+  }
   telem_ptr->special_b.onJob = false;
   telem_ptr->special_b.onCarJob = false;
   telem_ptr->special_b.carJobCancelled = false;
@@ -1274,6 +1406,19 @@ SCSAPI_RESULT scs_telemetry_init(
       log_line(SCS_LOG_TYPE_warning,
                "Failed to register mandatory break channel: %d", result);
     }
+
+    if (telem_ptr->scs_values.game == ETS2 &&
+        telem_ptr->scs_values.version_minor >= 20) {
+      const auto bus_result = version_params->register_for_channel(
+          SCS_TELEMETRY_BUS_JOB_CHANNEL_average_satisfaction, SCS_U32_NIL,
+          SCS_VALUE_TYPE_float, SCS_TELEMETRY_CHANNEL_FLAG_no_value,
+          telemetry_store_bus_satisfaction, nullptr);
+      if (bus_result != SCS_RESULT_ok) {
+        log_line(SCS_LOG_TYPE_warning,
+                 "Failed to register bus satisfaction channel: %d",
+                 bus_result);
+      }
+    }
   }
 
   // Set the structure with defaults.
@@ -1306,6 +1451,7 @@ SCSAPI_VOID scs_telemetry_shutdown() {
             telem_ptr->scs_values.version_minor = 0;
             telem_ptr->special_b.onJob = false;
             telem_ptr->special_b.onCarJob = false;
+            telem_ptr->special_b.onBusJob = false;
             telem_ptr->car_extension.activeJobType = active_job_none;
 
             telem_ptr->time = 0;
@@ -1316,6 +1462,7 @@ SCSAPI_VOID scs_telemetry_shutdown() {
         }
         telem_mem->Close();
     }
+    close_bus_memory();
 }
 
 // Telemetry api.
@@ -1323,7 +1470,6 @@ SCSAPI_VOID scs_telemetry_shutdown() {
 // ReSharper disable once CppInconsistentNaming
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason_for_call, LPVOID reseved) {
   if (reason_for_call == DLL_PROCESS_DETACH) {
-      // cleanup input mmf.
       scs_telemetry_shutdown();
   }
   return TRUE;
